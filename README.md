@@ -74,7 +74,7 @@ docker compose --profile full up
 ## 测试与质量
 
 ```bash
-pytest          # 190 用例，覆盖率 86%（门槛 30%，内置于 pyproject）
+pytest          # 203 用例，覆盖率 87%（门槛 30%，内置于 pyproject）
 ruff check .    # lint
 ```
 
@@ -86,6 +86,53 @@ ruff check .    # lint
 - **请求限流**：按客户端 IP 的滑动窗口限流（纯标准库实现），`RATE_LIMIT_RPM` 控制每分钟上限（默认 60，0=关闭），`/health` 探针豁免，超限返回 429 + `Retry-After`
 - **LLM 重试与降级**：`BP_LLM_MAX_RETRIES` 控制 SDK 层指数退避重试（默认 2）；重试耗尽后 SSE 流推送 `error` 事件（"服务暂时不可用"话术），用户端拿到降级答复而非断流
 - **优雅关停**：服务 lifespan 关闭时关停工具执行线程池（不阻塞在途任务），避免进程退出挂起
+
+## 可观测性
+
+`src/observability.py` 提供结构化日志 + Prometheus 指标（P2 基建），随服务自动生效：
+
+- **X-Request-ID 全链路串联**：中间件自动生成 12 位十六进制请求 ID（或透传网关传入值）并回写响应头，同一次请求内的全部日志行携带同一 `request_id`——包括 SSE 流式接口里线程池中执行的 ReAct 各步（contextvars 手动跨线程传播）
+- **JSON 行式日志**：默认一行一条 JSON（Docker / Loki 直接解析），`BP_LOG_FORMAT=text` 切人读格式，`BP_LOG_LEVEL` 控制级别（默认 INFO）。真实样例：
+
+```json
+{"ts": "2026-10-23T15:30:26", "level": "INFO", "logger": "serve", "msg": "预加载混合检索索引（BM25 + BGE + RRF）...", "request_id": "3f9c2a1b8e07"}
+```
+
+- **指标清单**（`GET /metrics`，Prometheus 文本协议，限流豁免）：
+
+| 指标 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `http_requests_total` | Counter | method / path / status | 请求计数（path 取路由模板如 `/session/{session_id}`，防标签基数爆炸） |
+| `http_request_duration_seconds` | Histogram | path | 请求延迟（桶 5ms~10s；SSE 流只统计到响应头返回） |
+| `rate_limit_rejected_total` | Counter | — | 限流拒绝（429）计数，便于告警配额 |
+| `llm_calls_total` | Counter | status | LLM 调用计数（ok / error） |
+| `llm_call_duration_seconds` | Histogram | — | LLM 调用延迟（桶 0.1s~60s） |
+| `GET /metrics` | 端点 | — | 抓取端点（`include_in_schema=False`，不进 OpenAPI） |
+
+```bash
+curl localhost:8000/metrics    # 抓取指标
+curl -H "X-Request-ID: abc123" localhost:8000/health    # 响应头原样回传该 ID
+```
+
+中间件注册顺序：`install_observability(app)` 在 `install_rate_limit(app)` 之后调用（FastAPI 后注册的 HTTP 中间件位于外层），限流器返回的 429 才会流经可观测中间件被统计进 `rate_limit_rejected_total`。
+
+## 评估门禁
+
+检索质量回归在合入前拦截：`evals/gate.py` 用**与线上一致的语料**（`tools._build_hybrid_docs()`，20 FAQ + 6 产品 + 9 故障共 35 篇）构建 BM25 索引，对 `evals/evalset.json` 黄金集（34 条真实客户口吻中文问句 → 期望命中文档 id，覆盖 FAQ 咨询 / 产品型号 / 故障症状三类，难度混合）统计 **BM25-only 词面检索 Top1 / Top3 命中率**：
+
+- **为什么锁 BM25-only**：纯 numpy 确定性计算，CI 无模型权重可跑；BM25 是混合检索（BM25 + BGE + RRF + Rerank）的召回下限，词面检索劣化必然拖累混合检索——注意这是门禁基线口径，与上方混合检索（含 Dense + Rerank）的完整评测数据口径不同
+- **阈值**（`evals/thresholds.json`，实测数字留余量向下取整）：任一项低于阈值则以退出码 1 结束，CI `eval-gate` job 挂红
+
+| 指标 | 实测 | 阈值 |
+|---|---|---|
+| Top1 命中率 | 94.1%（32/34） | ≥ 90% |
+| Top3 命中率 | 100%（34/34） | ≥ 95% |
+
+```bash
+python evals/gate.py    # 本地运行：输出每项 PASS/FAIL + 实测数字
+```
+
+CI 流水线为 lint → test → **eval-gate** → docker（docker 需前三项全部通过）。
 
 ## API 一览
 
@@ -114,7 +161,8 @@ ruff check .    # lint
 │   ├── semantic_cache.py       # 两级语义缓存（问题级 + 工具级）
 │   ├── conversation.py         # 会话管理（截断/过期清理）
 │   └── parallel_executor.py    # 并行工具执行器（保序）
-├── tests/                      # 190 用例，13 个测试模块
+├── tests/                      # 203 用例，14 个测试模块
+├── evals/                      # 检索评估门禁（evalset.json 黄金集 + thresholds.json 阈值 + gate.py）
 ├── data/                       # 评估数据集（benchmark_100 / adversarial）
 ├── scripts/                    # 回归脚本 / 评估集生成
 ├── index.html                  # Web UI

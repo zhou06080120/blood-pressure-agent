@@ -26,6 +26,7 @@ dependencies = [
     "uvicorn>=0.29.0",
     "numpy>=1.24.0",
     "faiss-cpu>=1.7.3",
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +62,7 @@ addopts = [
     "--cov=troubleshoot_graph",
     "--cov=parallel_executor",
     "--cov=serve",
+    "--cov=observability",
     "--cov-report=term-missing",
     "--cov-fail-under=30",
 ]

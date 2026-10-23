@@ -1,12 +1,14 @@
 # ═════════════════════════════════════════════════════════════════
-# CI 流水线：lint → 单元测试（带覆盖率门槛）→ Docker 镜像构建
+# CI 流水线：lint → 单元测试（带覆盖率门槛）→ BM25 检索门禁 → Docker 镜像构建
 #
 # 设计要点：
 #   - Python 3.10 / 3.12 双版本矩阵（requires-python 下限 + 开发环境版本）
 #   - 测试全程零外部依赖：占位 API Key + 强制模型降级路径（见 tests/conftest.py），
 #     本地与 CI 行为完全一致，无需真实 Key / 本地模型即可全量跑通
 #   - 覆盖率门槛 30%（pyproject addopts 内置）：LLM 真实调用路径由集成环境覆盖
-#   - Docker 构建使用 GHA 层缓存，仅在 lint + 测试通过后执行
+#   - eval-gate 检索门禁：BM25-only 词面检索 Top1/Top3 命中率对照
+#     evals/thresholds.json 阈值（纯 numpy 确定性计算，CI 无模型权重可跑）
+#   - Docker 构建使用 GHA 层缓存，仅在 lint + 测试 + 门禁通过后执行
 # ═════════════════════════════════════════════════════════════════
 
 name: CI
@@ -69,10 +71,29 @@ jobs:
           path: .coverage
           retention-days: 7
 
+  eval-gate:
+    name: Eval gate (BM25 检索基线)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run BM25 retrieval gate
+        run: python evals/gate.py
+
   docker:
     name: Docker build
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    needs: [lint, test, eval-gate]
     steps:
       - uses: actions/checkout@v4
 

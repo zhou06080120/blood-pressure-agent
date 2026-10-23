@@ -28,10 +28,13 @@ from typing import Generator  # 类型标注：run() 是一个生成器
 
 from openai import OpenAI  # OpenAI 兼容客户端（本项目指向 DashScope）
 
+from observability import llm_call_timer  # LLM 调用统一埋点：with 包住 create 调用即自动计数与计时
+
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # 规避 faiss 与系统库的 OpenMP 重复加载冲突
 
 logging.basicConfig(level=logging.WARNING)  # 只输出警告及以上，避免工具内部日志刷屏
 logger = logging.getLogger(__name__)  # 本模块日志器
+logger.setLevel(logging.INFO)  # 本模块单独放开到 INFO：run_and_print 演示输出已转 logger，CLI 模式下仍需可见（工具等其他模块维持 WARNING 不刷屏）
 
 # ── LLM 客户端 ────────────────────────────────────────────────────────────────
 client = OpenAI(  # 创建 LLM 客户端（DashScope 的 OpenAI 兼容端点）
@@ -184,14 +187,15 @@ def run(question: str, max_steps: int = 10, verbose: bool = True,
             return
 
         try:  # LLM 调用加固：网络抖动/超时/SDK 重试耗尽不让 SSE 流直接断掉
-            response = client.chat.completions.create(  # 调 LLM 生成下一步
-                model=MODEL,  # 模型名
-                messages=messages,  # 完整上下文（系统提示 + 历史 + 本轮）
-                temperature=0,  # 温度 0：客服场景要求输出稳定、可解析
-                stop=["Observation:"],  # 让模型停在调用工具前
-                timeout=float(os.getenv("BP_LLM_TIMEOUT", "60")),  # 请求超时秒数，防网络卡死
-            )
-        except Exception as e:  # 调用层任何异常（SDK 重试后仍失败）
+            with llm_call_timer():  # 埋点：统计本次 LLM 调用次数与耗时（成功 ok / 异常 error）
+                response = client.chat.completions.create(  # 调 LLM 生成下一步
+                    model=MODEL,  # 模型名
+                    messages=messages,  # 完整上下文（系统提示 + 历史 + 本轮）
+                    temperature=0,  # 温度 0：客服场景要求输出稳定、可解析
+                    stop=["Observation:"],  # 让模型停在调用工具前
+                    timeout=float(os.getenv("BP_LLM_TIMEOUT", "60")),  # 请求超时秒数，防网络卡死
+                )
+        except Exception as e:  # 调用层任何异常（SDK 重试后仍失败；llm_call_timer 已计 error 并原样上抛至此）
             logger.warning(f"LLM 调用失败: {e}")  # 记日志（SDK 异常不含密钥）
             yield {"step": step, "type": "error",  # 沿用项目现有 error 事件格式
                    "answer": "服务暂时不可用，请稍后重试或联系人工客服。",  # 给用户的降级话术
@@ -311,13 +315,13 @@ def _c(color: str, text: str) -> str:
 # ═══ 功能块：run_and_print —— CLI 入口：消费事件流并彩色打印全过程 ═══
 def run_and_print(question: str, max_steps: int = 10,
                   history: list[dict] | None = None):
-    """CLI 入口：运行手写 ReAct 并逐步彩色打印 Thought/Action/Observation 与最终答案"""
-    print(f"\n{'='*60}")  # 顶部横幅
-    print(f"问题: {question}")  # 打印问题
-    print(f"模型: {MODEL}  实现: 手写Prompt解析")  # 打印模型与实现方式
+    """CLI 入口：运行手写 ReAct 并逐步彩色输出 Thought/Action/Observation 与最终答案（logger 版）"""
+    logger.info(f"\n{'='*60}")  # 顶部横幅
+    logger.info(f"问题: {question}")  # 输出问题
+    logger.info(f"模型: {MODEL}  实现: 手写Prompt解析")  # 输出模型与实现方式
     if history:  # 多轮模式
-        print(f"多轮对话: 已带入 {len(history)} 条历史消息")  # 提示带入的历史条数
-    print('='*60)  # 横幅收尾
+        logger.info(f"多轮对话: 已带入 {len(history)} 条历史消息")  # 提示带入的历史条数
+    logger.info('='*60)  # 横幅收尾
 
     start = time.time()  # 记录开始时间
     step_count = 0  # 事件计数器
@@ -327,22 +331,22 @@ def run_and_print(question: str, max_steps: int = 10,
         stype = step_data["type"]  # 取事件类型分发
 
         if stype == "action":  # 工具调用事件
-            print(f"\n[Step {step_data['step']}]")  # 步骤标题
-            print(_c("thought", f"🧠 Thought: {step_data['thought']}"))  # 思考（青色）
-            print(_c("action",  f"🔧 Action:  {step_data['action']}"))  # 工具名（黄色）
-            print(_c("action",  f"   Input:   {json.dumps(step_data['action_input'], ensure_ascii=False)}"))  # 参数 JSON
-            print(_c("obs",     f"👁  Obs:     {step_data['observation'][:300]}"))  # 观察结果截断 300 字符（绿色）
+            logger.info(f"\n[Step {step_data['step']}]")  # 步骤标题
+            logger.info(_c("thought", f"🧠 Thought: {step_data['thought']}"))  # 思考（青色）
+            logger.info(_c("action",  f"🔧 Action:  {step_data['action']}"))  # 工具名（黄色）
+            logger.info(_c("action",  f"   Input:   {json.dumps(step_data['action_input'], ensure_ascii=False)}"))  # 参数 JSON
+            logger.info(_c("obs",     f"👁  Obs:     {step_data['observation'][:300]}"))  # 观察结果截断 300 字符（绿色）
 
         elif stype == "final":  # 最终答案事件
             elapsed = time.time() - start  # 计算总耗时
-            print(f"\n{'─'*60}")  # 结果分隔线
-            if step_data.get("thought"):  # 有收尾思考才打印
-                print(_c("thought", f"🧠 Thought: {step_data['thought']}"))  # 收尾思考
-            print(_c("final",  f"\n✅ Final Answer:\n{step_data['answer']}"))  # 最终答案（品红）
-            print(f"\n共 {step_data['step']} 步，耗时 {elapsed:.1f}s")  # 步数与耗时统计
+            logger.info(f"\n{'─'*60}")  # 结果分隔线
+            if step_data.get("thought"):  # 有收尾思考才输出
+                logger.info(_c("thought", f"🧠 Thought: {step_data['thought']}"))  # 收尾思考
+            logger.info(_c("final",  f"\n✅ Final Answer:\n{step_data['answer']}"))  # 最终答案（品红）
+            logger.info(f"\n共 {step_data['step']} 步，耗时 {elapsed:.1f}s")  # 步数与耗时统计
 
         elif stype in ("error", "max_steps"):  # 错误/步数耗尽事件
-            print(_c("error", f"\n⚠️  {step_data.get('answer', step_data.get('observation', ''))}"))  # 红色警示信息
+            logger.warning(_c("error", f"\n⚠️  {step_data.get('answer', step_data.get('observation', ''))}"))  # 红色警示信息
 
 
 if __name__ == "__main__":  # 直接命令行运行入口

@@ -27,10 +27,13 @@ from typing import Generator  # run() 是生成器类型
 
 from openai import OpenAI  # 兼容 OpenAI 协议的 SDK（DeepSeek/通义均可复用）
 
+from observability import llm_call_timer  # LLM 调用统一埋点：with 包住 create 调用即自动计数与计时
+
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # 允许多份 OpenMP 共存，防 numpy/faiss 崩溃
 
 logging.basicConfig(level=logging.WARNING)  # 日志级别压到警告
 logger = logging.getLogger(__name__)  # 模块日志器
+logger.setLevel(logging.INFO)  # 本模块单独放开到 INFO：run_and_print 演示输出已转 logger，CLI 模式下仍需可见（工具等其他模块维持 WARNING 不刷屏）
 
 # client = OpenAI(
 #     api_key=os.getenv("DASHSCOPE_API_KEY"),
@@ -116,15 +119,16 @@ def run(question: str, max_steps: int = 10,
             return
 
         try:  # LLM 调用加固：网络抖动/超时/SDK 重试耗尽不让 SSE 流直接断掉
-            response = client.chat.completions.create(  # 调 LLM：带工具 Schema 的对话补全
-                model=MODEL,  # 模型名
-                messages=messages,  # 当前对话上下文
-                tools=TOOLS_SCHEMA,  # 声明可调用的工具（FC 协议核心）
-                tool_choice="auto",  # 由模型自主决定调工具还是直接回答
-                temperature=0,  # 温度 0：结果稳定可复现
-                timeout=float(os.getenv("BP_LLM_TIMEOUT", "60")),  # 超时（环境变量可调）
-            )
-        except Exception as e:  # 调用层任何异常（SDK 重试后仍失败）
+            with llm_call_timer():  # 埋点：统计本次 LLM 调用次数与耗时（成功 ok / 异常 error）
+                response = client.chat.completions.create(  # 调 LLM：带工具 Schema 的对话补全
+                    model=MODEL,  # 模型名
+                    messages=messages,  # 当前对话上下文
+                    tools=TOOLS_SCHEMA,  # 声明可调用的工具（FC 协议核心）
+                    tool_choice="auto",  # 由模型自主决定调工具还是直接回答
+                    temperature=0,  # 温度 0：结果稳定可复现
+                    timeout=float(os.getenv("BP_LLM_TIMEOUT", "60")),  # 超时（环境变量可调）
+                )
+        except Exception as e:  # 调用层任何异常（SDK 重试后仍失败；llm_call_timer 已计 error 并原样上抛至此）
             logger.warning(f"LLM 调用失败: {e}")  # 记日志（SDK 异常不含密钥）
             yield {"step": step, "type": "error",  # 沿用项目现有 error 事件格式
                    "answer": "服务暂时不可用，请稍后重试或联系人工客服。",  # 给用户的降级话术
@@ -275,13 +279,13 @@ def _c(color: str, text: str) -> str:
 # ═══ 功能块：CLI 入口 —— 逐步彩色打印 ReAct 过程 ═══
 def run_and_print(question: str, max_steps: int = 10,
                   history: list[dict] | None = None):
-    """CLI 入口：运行 Function Calling 版 ReAct 并逐步彩色打印调用过程与最终答案"""
-    print(f"\n{'='*60}")  # 分隔线
-    print(f"问题: {question}")  # 打印问题
-    print(f"模型: {MODEL}  实现: Function Calling")  # 打印模型与实现方式
+    """CLI 入口：运行 Function Calling 版 ReAct 并逐步彩色输出调用过程与最终答案（logger 版）"""
+    logger.info(f"\n{'='*60}")  # 分隔线
+    logger.info(f"问题: {question}")  # 输出问题
+    logger.info(f"模型: {MODEL}  实现: Function Calling")  # 输出模型与实现方式
     if history:  # 有历史
-        print(f"多轮对话: 已带入 {len(history)} 条历史消息")  # 提示历史条数
-    print('='*60)  # 分隔线
+        logger.info(f"多轮对话: 已带入 {len(history)} 条历史消息")  # 提示历史条数
+    logger.info('='*60)  # 分隔线
 
     start = time.time()  # 计时起点
 
@@ -289,21 +293,21 @@ def run_and_print(question: str, max_steps: int = 10,
         stype = step_data["type"]  # 事件类型
 
         if stype == "action":  # 工具调用事件
-            print(f"\n[Step {step_data['step']}]")  # 打印步骤标题
+            logger.info(f"\n[Step {step_data['step']}]")  # 输出步骤标题
             # Thought 在 FC 版不可见，显示提示
-            print(_c("thought", "🧠 Thought: （模型内部推理，Function Calling 版不可见）"))  # 说明性占位
-            print(_c("action",  f"🔧 Action:  {step_data['action']}"))  # 工具名
-            print(_c("action",  f"   Input:   {json.dumps(step_data['action_input'], ensure_ascii=False)}"))  # 参数
-            print(_c("obs",     f"👁  Obs:     {step_data['observation'][:300]}"))  # 观察（截断 300 字）
+            logger.info(_c("thought", "🧠 Thought: （模型内部推理，Function Calling 版不可见）"))  # 说明性占位
+            logger.info(_c("action",  f"🔧 Action:  {step_data['action']}"))  # 工具名
+            logger.info(_c("action",  f"   Input:   {json.dumps(step_data['action_input'], ensure_ascii=False)}"))  # 参数
+            logger.info(_c("obs",     f"👁  Obs:     {step_data['observation'][:300]}"))  # 观察（截断 300 字）
 
         elif stype == "final":  # 最终答案事件
             elapsed = time.time() - start  # 总耗时
-            print(f"\n{'─'*60}")
-            print(_c("final", f"\n✅ Final Answer:\n{step_data['answer']}"))  # 彩色答案
-            print(f"\n共 {step_data['step']} 步，耗时 {elapsed:.1f}s")  # 步数与耗时
+            logger.info(f"\n{'─'*60}")
+            logger.info(_c("final", f"\n✅ Final Answer:\n{step_data['answer']}"))  # 彩色答案
+            logger.info(f"\n共 {step_data['step']} 步，耗时 {elapsed:.1f}s")  # 步数与耗时
 
         elif stype in ("error", "max_steps"):  # 异常/步数耗尽事件
-            print(_c("error", f"\n⚠️  {step_data.get('answer', '')}"))  # 红色警示
+            logger.warning(_c("error", f"\n⚠️  {step_data.get('answer', '')}"))  # 红色警示
 
 
 if __name__ == "__main__":  # 直接运行本文件才走 CLI

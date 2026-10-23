@@ -38,7 +38,9 @@ from pydantic import BaseModel  # 请求体模型定义与校验
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # 规避 faiss 与系统库的 OpenMP 重复加载冲突
 sys.path.insert(0, str(Path(__file__).parent))  # 把 src 目录加入模块搜索路径，从项目根启动也能导入各模块
 
-logging.basicConfig(level=logging.INFO)  # INFO 级日志
+from observability import install_observability, request_id_var, setup_logging  # 可观测基建：日志初始化/指标中间件/请求 ID 上下文（sys.path 注入后才能导入）
+
+setup_logging()  # 结构化日志初始化：默认 JSON 行式（供日志采集器解析），BP_LOG_FORMAT=text 切人读格式
 logger = logging.getLogger(__name__)  # 本模块日志器
 
 
@@ -70,6 +72,9 @@ def _setup_rate_limit(app: FastAPI) -> None:
 
 
 _setup_rate_limit(app)  # 应用创建后立即注册（此时读 RATE_LIMIT_RPM 环境变量）
+
+# ── 可观测性：指标中间件 + /metrics 端点 ─────────────────────────────────────
+install_observability(app)  # 必须在限流之后注册：FastAPI 后注册的 HTTP 中间件位于外层，限流器返回的 429 才会流经本中间件被统计进指标
 
 
 # ── 请求/响应模型 ─────────────────────────────────────────────────────────────
@@ -110,13 +115,16 @@ async def _stream_react(question: str, max_steps: int, mode: str,
 
     queue: asyncio.Queue = asyncio.Queue()  # 跨线程事件队列：worker 线程 put、本协程 get
     _SENTINEL = object()  # 哨兵对象：全局唯一，标记"worker 已跑完"
+    rid = request_id_var.get()  # 先在请求协程上下文里取 request_id（线程池线程不继承 contextvars，只能手动带过去）
 
     def _worker():  # 工作线程函数：同步执行 ReAct 生成器
+        token = request_id_var.set(rid)  # 线程池不继承上下文，手动注入使 ReAct 各步日志带 request_id
         try:
             for step_data in react_run(question, max_steps=max_steps, history=history):  # 逐步消费同步生成器
                 queue.put_nowait(step_data)  # 每步事件塞进队列
         finally:  # 无论正常结束还是抛异常
             queue.put_nowait(_SENTINEL)  # 必须投递哨兵，否则主协程会永久等待
+            request_id_var.reset(token)  # 线程池复用线程，必须复位防串号到下一任务
 
     yield _sse({"type": "start", "question": question, "mode": mode,  # 先推 start 事件：前端立即显示"思考中"
                 "session_id": session_id, "history_turns": len(history) // 2})  # 历史轮数（user+assistant 成对，除 2）
