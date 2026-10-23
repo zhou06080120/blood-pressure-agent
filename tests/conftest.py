@@ -19,6 +19,7 @@ os.environ.setdefault("DASHSCOPE_API_KEY", "sk-test-placeholder")
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test-placeholder")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-placeholder")
 os.environ.setdefault("AGENT_MODEL", "qwen-max-test")
+os.environ.setdefault("RATE_LIMIT_RPM", "0")  # 测试默认关闭限流（serve 导入时读此变量决定是否注册中间件）；限流专项测试自建 app
 os.environ["BP_EMBED_PROVIDER"] = "local"
 # 指向确定不存在的模型路径 → _load_st_model() / CrossEncoder 加载失败 → 走降级
 _NO_MODEL = os.path.join(os.path.dirname(__file__), "_definitely_no_model_here")

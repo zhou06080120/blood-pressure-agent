@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)  # 本模块日志器
 client = OpenAI(  # 创建 LLM 客户端（DashScope 的 OpenAI 兼容端点）
     api_key=os.getenv("DASHSCOPE_API_KEY"),  # 从环境变量读取 API Key
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",  # 阿里 DashScope 兼容模式地址
+    max_retries=int(os.getenv("BP_LLM_MAX_RETRIES", "2")),  # SDK 内置指数退避重试次数（环境变量可覆盖，0=不重试）
 )
 MODEL = os.getenv("AGENT_MODEL", "qwen-max")  # 默认模型 qwen-max，可用环境变量 AGENT_MODEL 覆盖
 # ↓↓↓ DeepSeek 备选客户端配置（原样保留备用，切换供应商时注释上方 client 并取消此处注释）
@@ -182,13 +183,20 @@ def run(question: str, max_steps: int = 10, verbose: bool = True,
                    "guards": sm.snapshot()}  # 附状态机快照便于排查
             return
 
-        response = client.chat.completions.create(  # 调 LLM 生成下一步
-            model=MODEL,  # 模型名
-            messages=messages,  # 完整上下文（系统提示 + 历史 + 本轮）
-            temperature=0,  # 温度 0：客服场景要求输出稳定、可解析
-            stop=["Observation:"],  # 让模型停在调用工具前
-            timeout=float(os.getenv("BP_LLM_TIMEOUT", "60")),  # 请求超时秒数，防网络卡死
-        )
+        try:  # LLM 调用加固：网络抖动/超时/SDK 重试耗尽不让 SSE 流直接断掉
+            response = client.chat.completions.create(  # 调 LLM 生成下一步
+                model=MODEL,  # 模型名
+                messages=messages,  # 完整上下文（系统提示 + 历史 + 本轮）
+                temperature=0,  # 温度 0：客服场景要求输出稳定、可解析
+                stop=["Observation:"],  # 让模型停在调用工具前
+                timeout=float(os.getenv("BP_LLM_TIMEOUT", "60")),  # 请求超时秒数，防网络卡死
+            )
+        except Exception as e:  # 调用层任何异常（SDK 重试后仍失败）
+            logger.warning(f"LLM 调用失败: {e}")  # 记日志（SDK 异常不含密钥）
+            yield {"step": step, "type": "error",  # 沿用项目现有 error 事件格式
+                   "answer": "服务暂时不可用，请稍后重试或联系人工客服。",  # 给用户的降级话术
+                   "error": str(e)[:200]}  # 错误摘要（截断防刷屏）
+            return  # 终止生成器：前端收到 error 事件后正常收尾
         llm_output = response.choices[0].message.content.strip()  # 取出模型文本输出并去空白
         parsed = _parse_step(llm_output)  # 正则解析为结构化事件
 

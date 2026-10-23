@@ -53,10 +53,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # 预加载失败不致命
         logger.warning(f"混合检索预加载失败（将在首次调用时重试）: {e}")  # 降级策略：首次请求时再构建
     logger.info("预加载完成，服务就绪")  # 预热完成
-    yield  # yield 前=启动逻辑，yield 后=关闭逻辑（本服务无需收尾清理）
+    yield  # yield 前=启动逻辑，yield 后=关闭逻辑
+    from parallel_executor import shutdown as shutdown_tool_pool  # 工具线程池关停入口（延迟导入：与上方各模块导入风格一致）
+    shutdown_tool_pool()  # 优雅关停：释放工具执行线程（不等待在途任务）
+    logger.info("工具线程池已关闭，服务退出")  # 记录关停完成
 
 
 app = FastAPI(title="ReAct 血压计客服 Agent", lifespan=lifespan)  # 创建应用实例并挂载生命周期钩子
+
+
+# ── 生产加固：请求限流 ────────────────────────────────────────────────────────
+def _setup_rate_limit(app: FastAPI) -> None:
+    """在应用上注册按客户端 IP 的滑动窗口限流（RATE_LIMIT_RPM<=0 时零开销跳过）"""
+    from rate_limit import install_rate_limit  # 延迟导入：src 内平铺模块，与各路由函数内导入风格一致
+    install_rate_limit(app)  # 注册 HTTP 中间件：请求进入路由前拦截，超阈值返回 429
+
+
+_setup_rate_limit(app)  # 应用创建后立即注册（此时读 RATE_LIMIT_RPM 环境变量）
 
 
 # ── 请求/响应模型 ─────────────────────────────────────────────────────────────

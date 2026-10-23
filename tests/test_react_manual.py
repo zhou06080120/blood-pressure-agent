@@ -152,3 +152,29 @@ class TestRunLoop:
         messages = client.calls[0]["messages"]
         assert messages[1]["content"] == "上一轮问题"    # 历史拼在 system 之后
         assert messages[-1]["content"] == "这轮的问题"
+
+
+# ═══ LLM 调用失败降级（生产加固：SSE 流不断流） ═══════════════════════════════
+
+class _BoomLLMClient:
+    """LLM 调用必抛异常的假客户端：模拟网络抖动/超时/SDK 重试耗尽"""
+
+    def __init__(self):
+        class _Completions:
+            @staticmethod
+            def create(**kwargs):
+                raise RuntimeError("Connection reset by peer")  # 模拟 SDK 重试后仍失败
+
+        class _Chat:
+            completions = _Completions()
+
+        self.chat = _Chat()
+
+
+class TestLLMFailureDegradation:
+    def test_llm_exception_yields_error_event(self, monkeypatch):
+        monkeypatch.setattr(react_manual, "client", _BoomLLMClient())
+        events = list(run("袖带怎么绑？"))  # 生成器正常终止，无异常向外抛
+        assert events[-1]["type"] == "error"  # 收到 error 降级事件
+        assert "服务暂时不可用" in events[-1]["answer"]  # 给用户的降级话术
+        assert "Connection reset" in events[-1]["error"]  # 错误摘要如实透出

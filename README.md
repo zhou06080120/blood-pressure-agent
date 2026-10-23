@@ -74,12 +74,18 @@ docker compose --profile full up
 ## 测试与质量
 
 ```bash
-pytest          # 180 用例，覆盖率 86%（门槛 30%，内置于 pyproject）
+pytest          # 190 用例，覆盖率 86%（门槛 30%，内置于 pyproject）
 ruff check .    # lint
 ```
 
 - 测试全程零外部依赖：占位 API Key + 强制模型降级路径（`tests/conftest.py`），本地与 CI 行为一致
 - 单测驱动修复了 4 处真实缺陷：并行执行器错误吞没、降级检索中文几乎无法命中、图谱深度检查时序、交互式反馈匹配失效
+
+## 生产加固
+
+- **请求限流**：按客户端 IP 的滑动窗口限流（纯标准库实现），`RATE_LIMIT_RPM` 控制每分钟上限（默认 60，0=关闭），`/health` 探针豁免，超限返回 429 + `Retry-After`
+- **LLM 重试与降级**：`BP_LLM_MAX_RETRIES` 控制 SDK 层指数退避重试（默认 2）；重试耗尽后 SSE 流推送 `error` 事件（"服务暂时不可用"话术），用户端拿到降级答复而非断流
+- **优雅关停**：服务 lifespan 关闭时关停工具执行线程池（不阻塞在途任务），避免进程退出挂起
 
 ## API 一览
 
@@ -108,7 +114,7 @@ ruff check .    # lint
 │   ├── semantic_cache.py       # 两级语义缓存（问题级 + 工具级）
 │   ├── conversation.py         # 会话管理（截断/过期清理）
 │   └── parallel_executor.py    # 并行工具执行器（保序）
-├── tests/                      # 180 用例，12 个测试模块
+├── tests/                      # 190 用例，13 个测试模块
 ├── data/                       # 评估数据集（benchmark_100 / adversarial）
 ├── scripts/                    # 回归脚本 / 评估集生成
 ├── index.html                  # Web UI

@@ -72,3 +72,9 @@ def _run_one(c: dict) -> dict:
     elapsed = round((time.perf_counter() - t0) * 1000, 1)  # 毫秒耗时（保留 1 位小数）
     return {"name": c["name"], "args": c["args"],
             "observation": str(observation), "error": error, "elapsed_ms": elapsed}  # error 如实反映执行结果
+
+
+# ═══ 功能块：优雅关停 —— 服务 lifespan 关闭时释放工具线程池 ═══
+def shutdown(wait: bool = False):
+    """优雅关停工具线程池（服务 lifespan 关闭时调用，不等待在途任务）。"""
+    _executor.shutdown(wait=wait)  # wait=False：不阻塞进程退出

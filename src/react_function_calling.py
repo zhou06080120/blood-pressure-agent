@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)  # 模块日志器
 client = OpenAI(  # 创建 LLM 客户端（FC 版默认走 DeepSeek）
     api_key=os.getenv("DEEPSEEK_API_KEY"),  # 从环境变量取 API Key
     base_url="https://api.deepseek.com",  # DeepSeek 的 OpenAI 兼容端点
+    max_retries=int(os.getenv("BP_LLM_MAX_RETRIES", "2")),  # SDK 内置指数退避重试次数（环境变量可覆盖，0=不重试）
 )
 MODEL = os.getenv("AGENT_MODEL", "deepseek-v4-flash")  # 模型名可用 AGENT_MODEL 覆盖
 
@@ -114,14 +115,21 @@ def run(question: str, max_steps: int = 10,
                    "guards": sm.snapshot()}  # 携带状态机快照
             return
 
-        response = client.chat.completions.create(  # 调 LLM：带工具 Schema 的对话补全
-            model=MODEL,  # 模型名
-            messages=messages,  # 当前对话上下文
-            tools=TOOLS_SCHEMA,  # 声明可调用的工具（FC 协议核心）
-            tool_choice="auto",  # 由模型自主决定调工具还是直接回答
-            temperature=0,  # 温度 0：结果稳定可复现
-            timeout=float(os.getenv("BP_LLM_TIMEOUT", "60")),  # 超时（环境变量可调）
-        )
+        try:  # LLM 调用加固：网络抖动/超时/SDK 重试耗尽不让 SSE 流直接断掉
+            response = client.chat.completions.create(  # 调 LLM：带工具 Schema 的对话补全
+                model=MODEL,  # 模型名
+                messages=messages,  # 当前对话上下文
+                tools=TOOLS_SCHEMA,  # 声明可调用的工具（FC 协议核心）
+                tool_choice="auto",  # 由模型自主决定调工具还是直接回答
+                temperature=0,  # 温度 0：结果稳定可复现
+                timeout=float(os.getenv("BP_LLM_TIMEOUT", "60")),  # 超时（环境变量可调）
+            )
+        except Exception as e:  # 调用层任何异常（SDK 重试后仍失败）
+            logger.warning(f"LLM 调用失败: {e}")  # 记日志（SDK 异常不含密钥）
+            yield {"step": step, "type": "error",  # 沿用项目现有 error 事件格式
+                   "answer": "服务暂时不可用，请稍后重试或联系人工客服。",  # 给用户的降级话术
+                   "error": str(e)[:200]}  # 错误摘要（截断防刷屏）
+            return  # 终止生成器：前端收到 error 事件后正常收尾
         msg    = response.choices[0].message  # 本轮消息对象（可能含 tool_calls）
         reason = response.choices[0].finish_reason  # 结束原因：stop=直接回答 / tool_calls=请求调工具
 
