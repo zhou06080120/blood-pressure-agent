@@ -31,7 +31,7 @@ import asyncio  # 异步队列与事件循环
 from contextlib import asynccontextmanager  # 把异步生成器注册为应用生命周期钩子
 from pathlib import Path  # 定位 index.html 与 src 目录
 
-from fastapi import FastAPI  # Web 框架主体
+from fastapi import Depends, FastAPI, Request  # Web 框架主体 + 依赖注入（管理端点守卫）+ 请求对象（审计取操作者）
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse  # HTML / JSON（合规拒绝）/ SSE 流式响应
 from pydantic import BaseModel  # 请求体模型定义与校验
 
@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent))  # 把 src 目录加入模块搜�
 
 from observability import install_observability, request_id_var, setup_logging  # 可观测基建：日志初始化/指标中间件/请求 ID 上下文（sys.path 注入后才能导入）
 from compliance import MEDICAL_DISCLAIMER, ComplianceError, check_injection, validate_query  # 医疗合规：输入校验 / 注入拦截 / 统一免责声明（sys.path 注入后才能导入）
+from auth import install_auth, require_admin  # API 鉴权：Key 校验中间件 + 管理端点角色守卫（sys.path 注入后才能导入）
 
 setup_logging()  # 结构化日志初始化：默认 JSON 行式（供日志采集器解析），BP_LOG_FORMAT=text 切人读格式
 logger = logging.getLogger(__name__)  # 本模块日志器
@@ -65,6 +66,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ReAct 血压计客服 Agent", lifespan=lifespan)  # 创建应用实例并挂载生命周期钩子
 
 
+# ── 生产加固：API Key 鉴权（P4 平台安全）───────────────────────────────────────
+install_auth(app)  # 必须先于限流注册（洋葱模型内层）：请求顺序为 observability(最外) → rate_limit → auth → 路由，限流先于鉴权执行可防 Key 暴力枚举，401/403 也被外层指标统计；未配置 BP_API_KEYS/BP_ADMIN_KEYS 时零注册（本地开发放行）
+
+
 # ── 生产加固：请求限流 ────────────────────────────────────────────────────────
 def _setup_rate_limit(app: FastAPI) -> None:
     """在应用上注册按客户端 IP 的滑动窗口限流（RATE_LIMIT_RPM<=0 时零开销跳过）"""
@@ -72,7 +77,7 @@ def _setup_rate_limit(app: FastAPI) -> None:
     install_rate_limit(app)  # 注册 HTTP 中间件：请求进入路由前拦截，超阈值返回 429
 
 
-_setup_rate_limit(app)  # 应用创建后立即注册（此时读 RATE_LIMIT_RPM 环境变量）
+_setup_rate_limit(app)  # 应用创建后立即注册（此时读 RATE_LIMIT_RPM 环境变量；须晚于 install_auth，使鉴权位于洋葱内层）
 
 # ── 可观测性：指标中间件 + /metrics 端点 ─────────────────────────────────────
 install_observability(app)  # 必须在限流之后注册：FastAPI 后注册的 HTTP 中间件位于外层，限流器返回的 429 才会流经本中间件被统计进指标
@@ -258,14 +263,29 @@ async def cache_stats_endpoint():
     return {"ok": True, **cache_stats()}  # 展开两级缓存统计返回
 
 
-@app.post("/cache/clear")  # 注册 POST 路由：清空缓存
-async def cache_clear_endpoint():
-    """清空语义缓存（问题级 + 工具级）"""
+# ── 管理端点守卫依赖 ───────────────────────────────────────────────────────────
+def _admin_guard(request: Request) -> None:
+    """管理端点守卫依赖：委托 auth.require_admin 判定角色。
+
+    显式标注 Request 类型后再转发——FastAPI 依赖解析要求类型注解才注入请求对象
+    （require_admin 的 request 形参无注解，直接 Depends 会按查询参数解析成 422）。
+    """
+    require_admin(request)  # 鉴权启用时非 admin 抛 403；未启用直接放行
+
+
+@app.post("/cache/clear", dependencies=[Depends(_admin_guard)])  # 管理端点：注册管理角色守卫（鉴权启用时非 admin 403；未启用时放行，保持本地开发兼容）
+async def cache_clear_endpoint(request: Request):  # 注入请求对象：读取鉴权中间件写入的操作者指纹
+    """清空语义缓存（问题级 + 工具级），管理操作审计留痕（谁在何时清了缓存）"""
+    from audit import record_audit  # 审计追加写（延迟导入：与各路由函数内导入风格一致）
     from semantic_cache import question_cache, tool_cache  # 两级缓存单例
+    detail = {"question_entries": len(question_cache._entries),  # 清理前问题级缓存规模（留痕便于追溯影响面）
+              "tool_entries": len(tool_cache._entries)}  # 清理前工具级缓存规模
     question_cache._entries.clear()  # 清空问题级缓存条目
     question_cache._hits = question_cache._misses = question_cache._semantic_hits = 0  # 问题级计数器归零
     tool_cache._entries.clear()  # 清空工具级缓存条目
     tool_cache._hits = tool_cache._misses = 0  # 工具级计数器归零
+    record_audit("cache_clear", target="semantic_cache", detail=detail,  # 审计留痕：动作 + 对象 + 清理规模
+                 actor=getattr(request.state, "actor_id", "-"))  # 操作者：鉴权中间件写入的 Key 指纹（未启用鉴权时为 "-"）
     return {"ok": True}  # 返回成功
 
 

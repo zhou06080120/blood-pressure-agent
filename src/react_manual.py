@@ -17,8 +17,8 @@
   export DASHSCOPE_API_KEY="sk-xxx"
 """
 
-# ═══ 导入区：标准库 + OpenAI SDK ═══
-import os  # 读取环境变量（API Key、模型名、超时等配置）
+# ═══ 导入区：标准库 + LLM 网关 ═══
+import os  # KMP 开关等环境变量设置
 import re  # 正则表达式：解析 LLM 输出的 Thought/Action/Final Answer
 import json  # 解析 Action Input 的 JSON 参数体
 import time  # 统计 ReAct 端到端耗时
@@ -26,29 +26,14 @@ import logging  # 日志记录
 import argparse  # 命令行参数解析（--question / --max_steps）
 from typing import Generator  # 类型标注：run() 是一个生成器
 
-from openai import OpenAI  # OpenAI 兼容客户端（本项目指向 DashScope）
-
-from observability import llm_call_timer  # LLM 调用统一埋点：with 包住 create 调用即自动计数与计时
+from llm_gateway import chat as llm_chat  # LLM 统一网关：埋点/重试/主备切换集中处理，本模块不再持有客户端
+from llm_gateway import get_model  # 主链路模型名（AGENT_MODEL，CLI 展示用）
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # 规避 faiss 与系统库的 OpenMP 重复加载冲突
 
 logging.basicConfig(level=logging.WARNING)  # 只输出警告及以上，避免工具内部日志刷屏
 logger = logging.getLogger(__name__)  # 本模块日志器
 logger.setLevel(logging.INFO)  # 本模块单独放开到 INFO：run_and_print 演示输出已转 logger，CLI 模式下仍需可见（工具等其他模块维持 WARNING 不刷屏）
-
-# ── LLM 客户端 ────────────────────────────────────────────────────────────────
-client = OpenAI(  # 创建 LLM 客户端（DashScope 的 OpenAI 兼容端点）
-    api_key=os.getenv("DASHSCOPE_API_KEY"),  # 从环境变量读取 API Key
-    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",  # 阿里 DashScope 兼容模式地址
-    max_retries=int(os.getenv("BP_LLM_MAX_RETRIES", "2")),  # SDK 内置指数退避重试次数（环境变量可覆盖，0=不重试）
-)
-MODEL = os.getenv("AGENT_MODEL", "qwen-max")  # 默认模型 qwen-max，可用环境变量 AGENT_MODEL 覆盖
-# ↓↓↓ DeepSeek 备选客户端配置（原样保留备用，切换供应商时注释上方 client 并取消此处注释）
-# client = OpenAI(
-#     api_key=os.getenv("DEEPSEEK_API_KEY"),
-#     base_url="https://api.deepseek.com",
-# )
-# MODEL = os.getenv("AGENT_MODEL", "deepseek-v4-flash")
 
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
@@ -186,15 +171,12 @@ def run(question: str, max_steps: int = 10, verbose: bool = True,
                    "guards": sm.snapshot()}  # 附状态机快照便于排查
             return
 
-        try:  # LLM 调用加固：网络抖动/超时/SDK 重试耗尽不让 SSE 流直接断掉
-            with llm_call_timer():  # 埋点：统计本次 LLM 调用次数与耗时（成功 ok / 异常 error）
-                response = client.chat.completions.create(  # 调 LLM 生成下一步
-                    model=MODEL,  # 模型名
-                    messages=messages,  # 完整上下文（系统提示 + 历史 + 本轮）
-                    temperature=0,  # 温度 0：客服场景要求输出稳定、可解析
-                    stop=["Observation:"],  # 让模型停在调用工具前
-                    timeout=float(os.getenv("BP_LLM_TIMEOUT", "60")),  # 请求超时秒数，防网络卡死
-                )
+        try:  # LLM 调用加固：网络抖动/超时/重试耗尽不让 SSE 流直接断掉（埋点/重试/主备切换已收敛到网关内）
+            response = llm_chat(  # 网关统一入口：模型/超时/重试/主备切换由网关处理
+                messages,  # 完整上下文（系统提示 + 历史 + 本轮）
+                temperature=0,  # 温度 0：客服场景要求输出稳定、可解析
+                stop=["Observation:"],  # 让模型停在调用工具前
+            )
         except Exception as e:  # 调用层任何异常（SDK 重试后仍失败；llm_call_timer 已计 error 并原样上抛至此）
             logger.warning(f"LLM 调用失败: {e}")  # 记日志（SDK 异常不含密钥）
             yield {"step": step, "type": "error",  # 沿用项目现有 error 事件格式
@@ -318,7 +300,7 @@ def run_and_print(question: str, max_steps: int = 10,
     """CLI 入口：运行手写 ReAct 并逐步彩色输出 Thought/Action/Observation 与最终答案（logger 版）"""
     logger.info(f"\n{'='*60}")  # 顶部横幅
     logger.info(f"问题: {question}")  # 输出问题
-    logger.info(f"模型: {MODEL}  实现: 手写Prompt解析")  # 输出模型与实现方式
+    logger.info(f"模型: {get_model()}  实现: 手写Prompt解析")  # 输出模型与实现方式（模型名由网关统一解析）
     if history:  # 多轮模式
         logger.info(f"多轮对话: 已带入 {len(history)} 条历史消息")  # 提示带入的历史条数
     logger.info('='*60)  # 横幅收尾

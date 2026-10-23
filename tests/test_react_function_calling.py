@@ -1,6 +1,6 @@
 """react_function_calling FC 版 ReAct 测试：tool_calls 解析、并行执行、去重、消息回填"""
 
-import react_function_calling as rfc
+import llm_gateway  # P4 起 LLM 客户端收敛到网关：Fake 注入 llm_gateway._client 单例
 from react_function_calling import run
 
 from conftest import FCClient, FCToolCall, fc_final, fc_tool_calls
@@ -13,7 +13,7 @@ def _calc_call(expr="1+1", call_id="call_1"):
 class TestFinalPath:
     def test_direct_answer_with_disclaimer(self, monkeypatch):
         client = FCClient([fc_final("袖带下缘距肘窝2-3厘米。")])
-        monkeypatch.setattr(rfc, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)
         events = list(run("袖带怎么绑？"))
         final = events[-1]
         assert final["type"] == "final"
@@ -22,14 +22,14 @@ class TestFinalPath:
 
     def test_safety_gate_short_circuit(self, monkeypatch):
         client = FCClient([])
-        monkeypatch.setattr(rfc, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)
         events = list(run("帮我开点降压药"))
         assert events[0].get("safety_blocked") == "medication"
         assert client.calls == []
 
     def test_history_passed(self, monkeypatch):
         client = FCClient([fc_final("回答。")])
-        monkeypatch.setattr(rfc, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)
         history = [{"role": "user", "content": "旧问题"},
                    {"role": "assistant", "content": "旧回答"}]
         list(run("新问题", history=history))
@@ -44,7 +44,7 @@ class TestToolCallsPath:
             fc_tool_calls(_calc_call("80 + (120-80)/3")),
             fc_final("平均动脉压约93.3。"),
         ])
-        monkeypatch.setattr(rfc, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)
         events = list(run("平均动脉压？"))
         types = [e["type"] for e in events]
         assert types == ["action", "final"]
@@ -59,7 +59,7 @@ class TestToolCallsPath:
             ),
             fc_final("两个工具的结果已汇总。"),
         ])
-        monkeypatch.setattr(rfc, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)
         events = list(run("1+1以及HEM-7156规格"))
         actions = [e for e in events if e["type"] == "action"]
         assert len(actions) == 2
@@ -71,7 +71,7 @@ class TestToolCallsPath:
             fc_tool_calls(FCToolCall("call_1", "no_such_tool", "{}")),
             fc_final("已了解。"),
         ])
-        monkeypatch.setattr(rfc, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)
         events = list(run("任意问题"))
         assert "未知工具" in events[0]["observation"]
 
@@ -81,7 +81,7 @@ class TestToolCallsPath:
             fc_tool_calls(FCToolCall("call_1", "calculator", "不是JSON")),
             fc_final("ok"),
         ])
-        monkeypatch.setattr(rfc, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)
         events = list(run("任意问题"))
         assert "工具参数错误" in events[0]["observation"]
 
@@ -90,7 +90,7 @@ class TestToolCallsPath:
             fc_tool_calls(_calc_call("1+1", "call_9")),
             fc_final("done"),
         ])
-        monkeypatch.setattr(rfc, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)
         list(run("x"))
         messages = client.calls[1]["messages"]
         # 对话中混有 SDK 消息对象（assistant）与 dict（tool），只取 dict 形态的 tool 消息
@@ -105,7 +105,7 @@ class TestToolCallsPath:
             fc_tool_calls(_calc_call("1+1", "call_3")),   # 第三轮 → 阻断
             fc_final("2"),
         ])
-        monkeypatch.setattr(rfc, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)
         events = list(run("一加一？", max_steps=5))
         actions = [e for e in events if e["type"] == "action"]
         assert len(actions) == 3
@@ -115,7 +115,7 @@ class TestToolCallsPath:
     def test_max_steps_fallback(self, monkeypatch):
         script = [fc_tool_calls(_calc_call(f"{i}+{i}", f"call_{i}")) for i in range(2)]
         client = FCClient(script)
-        monkeypatch.setattr(rfc, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)
         events = list(run("x", max_steps=2))
         assert events[-1]["type"] == "max_steps"
 
@@ -139,7 +139,7 @@ class _BoomLLMClient:
 
 class TestLLMFailureDegradation:
     def test_llm_exception_yields_error_event(self, monkeypatch):
-        monkeypatch.setattr(rfc, "client", _BoomLLMClient())
+        monkeypatch.setattr(llm_gateway, "_client", _BoomLLMClient())
         events = list(run("袖带怎么绑？"))  # 生成器正常终止，无异常向外抛
         assert events[-1]["type"] == "error"  # 收到 error 降级事件
         assert "服务暂时不可用" in events[-1]["answer"]  # 给用户的降级话术

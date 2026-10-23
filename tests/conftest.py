@@ -20,6 +20,7 @@ os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test-placeholder")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-placeholder")
 os.environ.setdefault("AGENT_MODEL", "qwen-max-test")
 os.environ.setdefault("RATE_LIMIT_RPM", "0")  # 测试默认关闭限流（serve 导入时读此变量决定是否注册中间件）；限流专项测试自建 app
+os.environ["BP_LLM_MAX_RETRIES"] = "0"  # 网关显式重试默认关闭（重试/主备切换语义在 test_llm_gateway 内显式开启验证），避免 Boom 用例反复重试拖慢测试
 os.environ["BP_EMBED_PROVIDER"] = "local"
 # 指向确定不存在的模型路径 → _load_st_model() / CrossEncoder 加载失败 → 走降级
 _NO_MODEL = os.path.join(os.path.dirname(__file__), "_definitely_no_model_here")
@@ -51,7 +52,7 @@ class FakeLLMClient:
 
     usage:
         client = FakeLLMClient(["Thought: ...\\nFinal Answer: ..."])
-        monkeypatch.setattr(react_manual, "client", client)
+        monkeypatch.setattr(llm_gateway, "_client", client)  # P4 起 LLM 收敛到网关，Fake 注入网关主链路单例
     """
 
     def __init__(self, script):
@@ -162,9 +163,12 @@ def _clean_semantic_cache():
 @pytest.fixture(autouse=True)
 def _clean_conversations():
     from conversation import conv_manager
-    conv_manager._sessions.clear()
+    # P4 存储外置后不再直捣 _sessions，走公开接口逐个销毁（对 Memory/Redis 存储同构）
+    for info in conv_manager.list_sessions():  # 取当前全部会话摘要
+        conv_manager.destroy(info["session_id"])  # 逐个彻底销毁
     yield
-    conv_manager._sessions.clear()
+    for info in conv_manager.list_sessions():  # 用例结束后同样清场
+        conv_manager.destroy(info["session_id"])
 
 
 # ── 混合检索单例隔离：避免跨用例复用已构建索引 ────────────────────────────────

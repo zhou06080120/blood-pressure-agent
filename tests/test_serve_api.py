@@ -1,12 +1,12 @@
 """serve FastAPI 接口测试：健康检查、会话管理、缓存管理、SSE 流式查询、历史回写
 
 不触发 lifespan（直接 TestClient(app)），避免预加载混合检索索引；
-SSE 查询通过 monkeypatch 替换 react_manual 的 LLM 客户端实现全程离线。
+SSE 查询通过 monkeypatch 替换 LLM 网关主链路客户端（llm_gateway._client）实现全程离线。
 """
 
 import json
 
-import react_manual
+import llm_gateway  # P4 起 LLM 客户端收敛到网关：Fake 注入 llm_gateway._client 单例
 from fastapi.testclient import TestClient
 
 from serve import app
@@ -86,13 +86,35 @@ class TestCacheEndpoints:
         assert r.json()["ok"] is True
         assert question_cache.get("q") is None
 
+    def test_cache_clear_audited(self, tmp_path, monkeypatch):
+        # 清缓存管理操作必须审计留痕：BP_AUDIT_PATH 定向临时文件，断言 JSONL 落盘
+        import json as _json
+        audit_file = tmp_path / "audit.jsonl"
+        monkeypatch.setenv("BP_AUDIT_PATH", str(audit_file))
+        from semantic_cache import question_cache
+        question_cache.put("q", "a")  # 预置一条缓存，保证清理规模非零
+        r = client.post("/cache/clear")
+        assert r.json()["ok"] is True
+        entry = _json.loads(audit_file.read_text(encoding="utf-8"))  # 首条审计记录
+        assert entry["action"] == "cache_clear"  # 动作名
+        assert entry["actor"] == "-"  # 鉴权未启用：操作者为 "-"
+        assert entry["detail"]["question_entries"] == 1  # 清理前规模留痕
+
+    def test_cache_clear_403_when_auth_enabled(self, monkeypatch):
+        # 鉴权开关打开（模拟生产配 Key）且请求无 admin 角色 → 管理端点 403 拦截
+        import auth
+        monkeypatch.setattr(auth, "_auth_enabled", True)  # monkeypatch 自动还原，不污染其他用例
+        r = client.post("/cache/clear")
+        assert r.status_code == 403  # serve 单例未注册鉴权中间件（无 api_role），守卫按非 admin 拦截
+        assert "管理员" in r.json()["detail"]
+
 
 # ═══ SSE 流式查询（LLR mock） ═══════════════════════════════════════════════
 
 class TestQuerySSE:
     def test_manual_query_streams_events(self, fake_llm, monkeypatch):
         fake = fake_llm(["Thought: 信息足够\nFinal Answer: 袖带下缘距肘窝2-3厘米。"])
-        monkeypatch.setattr(react_manual, "client", fake)
+        monkeypatch.setattr(llm_gateway, "_client", fake)
         r = client.post("/query/manual", json={"question": "袖带怎么绑？"})
         assert r.status_code == 200
         events = _parse_sse(r.text)
@@ -105,7 +127,7 @@ class TestQuerySSE:
 
     def test_safety_block_streamed(self, fake_llm, monkeypatch):
         fake = fake_llm([])  # 安全闸短路：不触 LLM
-        monkeypatch.setattr(react_manual, "client", fake)
+        monkeypatch.setattr(llm_gateway, "_client", fake)
         r = client.post("/query/manual", json={"question": "帮我开点降压药"})
         events = _parse_sse(r.text)
         final = next(e for e in events if e["type"] == "final")
@@ -113,7 +135,7 @@ class TestQuerySSE:
 
     def test_multiturn_history_writeback(self, fake_llm, monkeypatch):
         fake = fake_llm(["Thought: ok\nFinal Answer: 依上文回答。"])
-        monkeypatch.setattr(react_manual, "client", fake)
+        monkeypatch.setattr(llm_gateway, "_client", fake)
         sid = client.post("/session/create").json()["session_id"]
         r = client.post("/query/manual",
                         json={"question": "袖带怎么绑？", "session_id": sid})
@@ -129,7 +151,7 @@ class TestQuerySSE:
             "Thought: ok\nFinal Answer: 第一轮回答。",
             "Thought: ok\nFinal Answer: 第二轮回答。",
         ])
-        monkeypatch.setattr(react_manual, "client", fake)
+        monkeypatch.setattr(llm_gateway, "_client", fake)
         sid = client.post("/session/create").json()["session_id"]
         client.post("/query/manual", json={"question": "第一轮问题", "session_id": sid})
         client.post("/query/manual", json={"question": "第二轮问题", "session_id": sid})
@@ -140,10 +162,9 @@ class TestQuerySSE:
 
     def test_fc_query_route_available(self, fc_llm, monkeypatch):
         # FC 版客户端同样 mock，全程离线
-        import react_function_calling as rfc
         FCClient, _ = fc_llm
 
-        monkeypatch.setattr(rfc, "client", FCClient(["袖带下缘距肘窝2-3厘米。"]))
+        monkeypatch.setattr(llm_gateway, "_client", FCClient(["袖带下缘距肘窝2-3厘米。"]))
         r = client.post("/query/fc", json={"question": "袖带怎么绑？", "max_steps": 3})
         assert r.status_code == 200
         assert "text/event-stream" in r.headers["content-type"]

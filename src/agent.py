@@ -17,8 +17,8 @@
   /quit     退出
 
 环境变量：
-  DASHSCOPE_API_KEY  必填（手写版默认）/ DEEPSEEK_API_KEY（FC版默认）
-  AGENT_MODEL        默认 qwen-max，可换 deepseek-v4-flash 等
+  DASHSCOPE_API_KEY  必填（两版统一经 llm_gateway 主链路接入）
+  AGENT_MODEL        默认 qwen-max；备链路用 BP_LLM_FALLBACK_* 配置
   BP_EMBED_PROVIDER  local（默认）/ dashscope
 """
 

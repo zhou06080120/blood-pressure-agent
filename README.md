@@ -37,7 +37,7 @@ pip install -e ".[embeddings]"
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入 DASHSCOPE_API_KEY（手写版）或 DEEPSEEK_API_KEY（FC 版）
+# 编辑 .env 填入 DASHSCOPE_API_KEY（两版 ReAct 统一经 LLM 网关接入，备链路可选）
 ```
 
 全部环境变量见 [.env.example](.env.example)，均有合理默认值，模型缺失时自动降级不阻塞启动。
@@ -74,7 +74,7 @@ docker compose --profile full up
 ## 测试与质量
 
 ```bash
-pytest          # 217 用例，覆盖率 88%（门槛 30%，内置于 pyproject）
+pytest          # 264 用例，覆盖率 88%（门槛 30%，内置于 pyproject）
 ruff check .    # lint
 ```
 
@@ -84,7 +84,7 @@ ruff check .    # lint
 ## 生产加固
 
 - **请求限流**：按客户端 IP 的滑动窗口限流（纯标准库实现），`RATE_LIMIT_RPM` 控制每分钟上限（默认 60，0=关闭），`/health` 探针豁免，超限返回 429 + `Retry-After`
-- **LLM 重试与降级**：`BP_LLM_MAX_RETRIES` 控制 SDK 层指数退避重试（默认 2）；重试耗尽后 SSE 流推送 `error` 事件（"服务暂时不可用"话术），用户端拿到降级答复而非断流
+- **LLM 重试与降级**：`BP_LLM_MAX_RETRIES` 控制网关层指数退避重试（默认 2，SDK 层已置 0 防两层重试相乘，`BP_LLM_RETRY_BACKOFF` 控制退避基数）；重试耗尽后 SSE 流推送 `error` 事件（"服务暂时不可用"话术），用户端拿到降级答复而非断流
 - **优雅关停**：服务 lifespan 关闭时关停工具执行线程池（不阻塞在途任务），避免进程退出挂起
 
 ## 医疗合规
@@ -123,7 +123,35 @@ curl localhost:8000/metrics    # 抓取指标
 curl -H "X-Request-ID: abc123" localhost:8000/health    # 响应头原样回传该 ID
 ```
 
-中间件注册顺序：`install_observability(app)` 在 `install_rate_limit(app)` 之后调用（FastAPI 后注册的 HTTP 中间件位于外层），限流器返回的 429 才会流经可观测中间件被统计进 `rate_limit_rejected_total`。
+中间件注册顺序：`install_observability(app)` 在 `install_rate_limit(app)` 之后调用（FastAPI 后注册的 HTTP 中间件位于外层），限流器返回的 429 才会流经可观测中间件被统计进 `rate_limit_rejected_total`；`install_auth(app)` 注册在限流之前（内层），请求顺序为 可观测 → 限流 → 鉴权 → 路由。
+
+## 平台安全与水平扩展（P4）
+
+**双级 API Key 鉴权**（`src/auth.py`）：`BP_API_KEYS`（用户级）/ `BP_ADMIN_KEYS`（管理级）逗号分隔配置，启用后全部业务端点要求 `Authorization: Bearer <key>`；无 Key 或错误 Key 返回 401，用户 Key 访问管理端点返回 403（语义分离）；`/health`、`/metrics`、`/`（Web UI）与 OPTIONS 预检豁免；两变量均未配置时自动放行，开发模式零负担。
+
+```bash
+export BP_API_KEYS="user-key-1,user-key-2"    # 用户级（逗号分隔多 Key）
+export BP_ADMIN_KEYS="admin-key-1"            # 管理级
+# 普通问答：用户 Key 放行
+curl -N -H "Authorization: Bearer user-key-1" -d '{"question":"袖带怎么绑"}' localhost:8000/query/manual
+# 管理操作：管理 Key 放行并落审计
+curl -X POST -H "Authorization: Bearer admin-key-1" localhost:8000/cache/clear
+# 用户 Key 打管理端点 → 403
+curl -X POST -H "Authorization: Bearer user-key-1" localhost:8000/cache/clear
+```
+
+**管理操作审计**（`src/audit.py`）：`/cache/clear` 等管理端点挂 `require_admin` 依赖并逐次调用 `record_audit` 落审计日志——JSONL 追加写入 `logs/audit.jsonl`（`BP_AUDIT_PATH` 可覆盖路径），记录 action / target / detail / 时间戳 / actor；actor 只存 Key 的 SHA-256 前 8 位指纹，明文密钥绝不落盘。
+
+**LLM 统一网关**（`src/llm_gateway.py`）：两版 ReAct（手写版 + FC 版）收敛到 `chat()` 单一入口，模块不再各自持有 SDK 客户端；网关内集中完成 `llm_call_timer` 埋点、显式指数退避重试与**主备链路切换**——主链路 DashScope（`DASHSCOPE_API_KEY` + `AGENT_MODEL`，默认 qwen-max）重试耗尽后自动切备链路（`BP_LLM_FALLBACK_BASE_URL` / `BP_LLM_FALLBACK_API_KEY` 同时配置才启用，`BP_LLM_FALLBACK_MODEL` 缺省沿用主模型名），主备各自再跑完整重试轮，单点供应商故障不再中断 SSE 流。
+
+**会话状态外置**（`src/conversation_store.py`）：`ConversationStore` 抽象基类 + 进程内存实现（默认，零依赖）+ Redis 实现；配置 `BP_REDIS_URL` 即切换 Redis 存储，多副本部署共享会话状态实现水平扩展，连接失败自动回落内存存储并告警（不阻塞启动）。Redis 为可选依赖：
+
+```bash
+pip install -e ".[redis]"                       # 安装可选依赖
+export BP_REDIS_URL=redis://localhost:6379/0    # 切换外置存储
+```
+
+docker-compose 场景在 `services` 下追加 `redis` 服务（`image: redis:7-alpine`），服务环境设 `BP_REDIS_URL=redis://redis:6379/0`，即可多副本共享会话（本地默认单副本内存存储，无需 Redis）。
 
 ## 评估门禁
 
@@ -153,7 +181,8 @@ CI 流水线为 lint → test → **eval-gate** → docker（docker 需前三项
 | POST | `/session/clear` | 清空会话历史 |
 | GET | `/session/{id}` / `/sessions` | 会话历史 / 会话列表 |
 | GET | `/health` | 健康检查 |
-| GET | `/cache/stats` / `/cache/clear` | 缓存统计 / 清空 |
+| GET | `/cache/stats` | 缓存统计 |
+| POST | `/cache/clear` | 清空缓存（**管理端点**：启用鉴权后需管理 Key，见 P4 小节） |
 
 ## 项目结构
 
@@ -168,9 +197,13 @@ CI 流水线为 lint → test → **eval-gate** → docker（docker 需前三项
 │   ├── safety_gate.py          # 输入/输出安全闸（注入/越狱/医学越界/免责声明）
 │   ├── guardrails.py           # 状态机 + 调用去重 + 连续失败恢复
 │   ├── semantic_cache.py       # 两级语义缓存（问题级 + 工具级）
-│   ├── conversation.py         # 会话管理（截断/过期清理）
+│   ├── conversation.py         # 会话管理（截断/过期清理，委托 Store）
+│   ├── conversation_store.py   # 会话存储抽象：内存（默认）/ Redis 外置（P4）
+│   ├── llm_gateway.py          # LLM 统一网关：埋点/重试/主备切换（P4）
+│   ├── auth.py                 # 双级 API Key 鉴权（P4）
+│   ├── audit.py                # 管理操作审计 JSONL（P4）
 │   └── parallel_executor.py    # 并行工具执行器（保序）
-├── tests/                      # 217 用例，15 个测试模块
+├── tests/                      # 264 用例，18 个测试模块
 ├── evals/                      # 检索评估门禁（evalset.json 黄金集 + thresholds.json 阈值 + gate.py）
 ├── data/                       # 评估数据集（benchmark_100 / adversarial）
 ├── scripts/                    # 回归脚本 / 评估集生成
