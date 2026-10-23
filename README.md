@@ -74,7 +74,7 @@ docker compose --profile full up
 ## 测试与质量
 
 ```bash
-pytest          # 203 用例，覆盖率 87%（门槛 30%，内置于 pyproject）
+pytest          # 217 用例，覆盖率 88%（门槛 30%，内置于 pyproject）
 ruff check .    # lint
 ```
 
@@ -86,6 +86,15 @@ ruff check .    # lint
 - **请求限流**：按客户端 IP 的滑动窗口限流（纯标准库实现），`RATE_LIMIT_RPM` 控制每分钟上限（默认 60，0=关闭），`/health` 探针豁免，超限返回 429 + `Retry-After`
 - **LLM 重试与降级**：`BP_LLM_MAX_RETRIES` 控制 SDK 层指数退避重试（默认 2）；重试耗尽后 SSE 流推送 `error` 事件（"服务暂时不可用"话术），用户端拿到降级答复而非断流
 - **优雅关停**：服务 lifespan 关闭时关停工具执行线程池（不阻塞在途任务），避免进程退出挂起
+
+## 医疗合规
+
+`src/compliance.py` 统一合规基建（零第三方依赖），`serve.py` 在创建 SSE 流式响应**之前**完成全部检查——流一旦开始就无法再改状态码，拒绝场景统一返回 400 JSON：
+
+- **免责声明策略**：统一文案常量 `MEDICAL_DISCLAIMER` 三处联动——SSE `done` 事件携带 `disclaimer` 字段、Web UI 页脚常驻展示（标注"以上内容由 AI 生成"）、输出安全闸强制附加在最终回答尾部
+- **输入校验规则**（`validate_query`）：空/纯空白输入拒绝、长度上限 500 字（超长拒绝）、控制字符剥离（保留 `\t\n\r`），校验通过后用清洗文本替换原始输入进入 ReAct
+- **注入拦截**（`check_injection`）：三类高置信 Prompt 注入模式（指令覆盖中/英文、扮演医务人员的角色劫持、系统提示词探测）命中即 400 拒绝并 `logger.warning` 记录风险类别；只收录高置信攻击语句，宁可漏报也不误伤正常医疗咨询
+- **密钥管理**：LLM API Key 等敏感配置仅通过环境变量注入，代码零硬编码；`.env.example` 提供全量变量模板（占位符），`.gitignore` 忽略 `.env` 绝不入库
 
 ## 可观测性
 
@@ -161,7 +170,7 @@ CI 流水线为 lint → test → **eval-gate** → docker（docker 需前三项
 │   ├── semantic_cache.py       # 两级语义缓存（问题级 + 工具级）
 │   ├── conversation.py         # 会话管理（截断/过期清理）
 │   └── parallel_executor.py    # 并行工具执行器（保序）
-├── tests/                      # 203 用例，14 个测试模块
+├── tests/                      # 217 用例，15 个测试模块
 ├── evals/                      # 检索评估门禁（evalset.json 黄金集 + thresholds.json 阈值 + gate.py）
 ├── data/                       # 评估数据集（benchmark_100 / adversarial）
 ├── scripts/                    # 回归脚本 / 评估集生成

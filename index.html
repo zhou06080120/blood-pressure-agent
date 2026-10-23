@@ -236,6 +236,18 @@
     flex-shrink: 0;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── 医疗免责声明页脚（合规要求常驻展示，与 API done 事件同款文案） ── */
+  .disclaimer-bar {
+    background: #131520;
+    border-top: 1px solid #2d3148;
+    padding: 10px 24px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #64748b;
+    text-align: center;
+    flex-shrink: 0;
+  }
 </style>
 </head>
 <body>
@@ -278,6 +290,11 @@
     <button class="send-btn" id="sendBtn" onclick="sendQuery()">发 送</button>
   </div>
 </div>
+
+<!-- ── 医疗免责声明（固定页脚，常驻展示；文案与 src/compliance.py 的 MEDICAL_DISCLAIMER 一致） ── -->
+<footer class="disclaimer-bar">
+  ⚠️ 以上内容由 AI 生成。本回答仅供健康教育参考，不能替代执业医师诊疗意见；如有不适或异常读数，请及时就医。
+</footer>
 
 <script>
   let currentMode = 'manual';

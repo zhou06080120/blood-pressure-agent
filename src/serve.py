@@ -32,13 +32,14 @@ from contextlib import asynccontextmanager  # 把异步生成器注册为应用�
 from pathlib import Path  # 定位 index.html 与 src 目录
 
 from fastapi import FastAPI  # Web 框架主体
-from fastapi.responses import HTMLResponse, StreamingResponse  # HTML 响应与 SSE 流式响应
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse  # HTML / JSON（合规拒绝）/ SSE 流式响应
 from pydantic import BaseModel  # 请求体模型定义与校验
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # 规避 faiss 与系统库的 OpenMP 重复加载冲突
 sys.path.insert(0, str(Path(__file__).parent))  # 把 src 目录加入模块搜索路径，从项目根启动也能导入各模块
 
 from observability import install_observability, request_id_var, setup_logging  # 可观测基建：日志初始化/指标中间件/请求 ID 上下文（sys.path 注入后才能导入）
+from compliance import MEDICAL_DISCLAIMER, ComplianceError, check_injection, validate_query  # 医疗合规：输入校验 / 注入拦截 / 统一免责声明（sys.path 注入后才能导入）
 
 setup_logging()  # 结构化日志初始化：默认 JSON 行式（供日志采集器解析），BP_LOG_FORMAT=text 切人读格式
 logger = logging.getLogger(__name__)  # 本模块日志器
@@ -83,6 +84,28 @@ class QueryRequest(BaseModel):  # 查询请求体：Pydantic 自动校验字段�
     question:   str  # 用户问题（必填）
     max_steps:  int = 10  # ReAct 循环最大步数，默认 10
     session_id: str | None = None   # 多轮对话：首次为 None，前端应先创建会话
+
+
+# ── 医疗合规：输入校验 + Prompt 注入拦截 ──────────────────────────────────────
+def _compliance_check(question: str) -> tuple[str, JSONResponse | None]:
+    """查询入口统一合规检查：先 validate_query 清洗校验，再 check_injection 注入检测。
+
+    必须在创建 StreamingResponse 之前完成——SSE 一旦开始流式输出就无法再改状态码，
+    拒绝场景只能靠这里的普通 400 JSON 响应表达。
+
+    :return: (清洗后的安全文本, None) 表示通过；(原始文本, 400 响应) 表示拒绝
+    """
+    try:
+        cleaned = validate_query(question)  # 校验并清洗：空输入 / 超长拒绝，控制字符剥离
+    except ComplianceError as e:  # 校验失败：str(e) 即构造时传入的用户可见报错文案
+        return question, JSONResponse(status_code=400, content={"detail": str(e)})
+    category = check_injection(cleaned)  # 注入检测：命中返回风险类别，未命中返回 None
+    if category:  # 命中高置信注入模式：记录风险类别供安全审计，用户侧返回统一话术（不回显原文防二次注入）
+        logger.warning(f"检测到 Prompt 注入（风险类别: {category}），已拒绝该请求")  # 风险类别随结构化日志（含 request_id）落盘
+        return cleaned, JSONResponse(
+            status_code=400,  # 与校验失败同为 400，但 detail 固定为统一安全话术
+            content={"detail": "检测到不安全的指令内容，请输入正常的血压计使用或健康咨询问题"})
+    return cleaned, None  # 全部通过：返回清洗后的安全文本供 ReAct 使用
 
 
 # ── SSE 流式生成器 ────────────────────────────────────────────────────────────
@@ -148,15 +171,18 @@ async def _stream_react(question: str, max_steps: int, mode: str,
         conv_manager.add_message(session_id, "user", question)  # 存 user 问题
         conv_manager.add_message(session_id, "assistant", final_answer)  # 存 assistant 最终回答
 
-    yield _sse({"type": "done"})  # 最后推 done 事件：前端结束本轮
+    yield _sse({"type": "done", "disclaimer": MEDICAL_DISCLAIMER})  # 最后推 done 事件：附带统一医疗免责声明，前端结束本轮
 
 
 # ── 查询路由 ──────────────────────────────────────────────────────────────────
 @app.post("/query/manual")  # 注册 POST 路由：手写版查询
 async def query_manual(req: QueryRequest):  # 请求体自动解析为 QueryRequest
     """手写 Prompt 解析版 ReAct 的流式查询入口（SSE）"""
+    cleaned, rejection = _compliance_check(req.question)  # 合规前置检查（必须在建流前完成，拒绝时才能返回 400 状态码）
+    if rejection is not None:  # 校验 / 注入未通过：直接返回 400 JSON，不进入 SSE 流
+        return rejection
     return StreamingResponse(  # 返回 SSE 流式响应
-        _stream_react(req.question, req.max_steps, "manual", req.session_id),  # 以 manual 模式运行事件流
+        _stream_react(cleaned, req.max_steps, "manual", req.session_id),  # 以 manual 模式运行事件流（用清洗后的安全文本）
         media_type="text/event-stream",  # SSE MIME 类型
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},  # 禁缓存/禁代理缓冲，保证实时推送
     )
@@ -165,8 +191,11 @@ async def query_manual(req: QueryRequest):  # 请求体自动解析为 QueryRequ
 @app.post("/query/fc")  # 注册 POST 路由：FC 版查询
 async def query_fc(req: QueryRequest):  # 请求体自动解析为 QueryRequest
     """Function Calling 版 ReAct 的流式查询入口（SSE）"""
+    cleaned, rejection = _compliance_check(req.question)  # 合规前置检查（必须在建流前完成，拒绝时才能返回 400 状态码）
+    if rejection is not None:  # 校验 / 注入未通过：直接返回 400 JSON，不进入 SSE 流
+        return rejection
     return StreamingResponse(  # 返回 SSE 流式响应
-        _stream_react(req.question, req.max_steps, "fc", req.session_id),  # 以 fc 模式运行事件流
+        _stream_react(cleaned, req.max_steps, "fc", req.session_id),  # 以 fc 模式运行事件流（用清洗后的安全文本）
         media_type="text/event-stream",  # SSE MIME 类型
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},  # 禁缓存/禁代理缓冲，保证实时推送
     )

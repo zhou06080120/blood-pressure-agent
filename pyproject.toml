@@ -63,6 +63,7 @@ addopts = [
     "--cov=parallel_executor",
     "--cov=serve",
     "--cov=observability",
+    "--cov=compliance",
     "--cov-report=term-missing",
     "--cov-fail-under=30",
 ]
