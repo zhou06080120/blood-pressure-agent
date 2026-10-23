@@ -1,0 +1,33 @@
+# 版本库与本地环境
+.git
+.venv
+venv
+
+# Python 运行产物
+__pycache__
+*.py[cod]
+*.egg-info
+
+# 测试与工具缓存
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# 本地模型（183MB BGE，运行时按需挂载，不进镜像层）
+bge-small-zh-v1.5
+models
+
+# 开发期工件（容器只跑 serve，不需要测试/脚本/评估产物）
+tests
+scripts
+evaluation
+data
+eval_result.json
+
+# 文档与环境配置
+*.md
+.env
+.env.*
+Dockerfile
+docker-compose.yml

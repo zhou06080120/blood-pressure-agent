@@ -1,0 +1,39 @@
+# ═════════════════════════════════════════════════════════════════
+# 血压计客服 Agent —— 容器编排
+#
+#   轻量版（默认，无模型依赖，检索自动降级 TF 向量 + BM25）：
+#     docker compose up
+#
+#   完整版（本地 BGE Dense 检索 + cross-encoder 重排，需先下载模型）：
+#     docker compose --profile full up
+#     模型放置于 ./bge-small-zh-v1.5（下载方式见 README）
+# ═════════════════════════════════════════════════════════════════
+
+services:
+  # ── 轻量版：base 依赖，零模型可启动（降级检索仍可用） ──
+  agent:
+    build: .
+    image: blood-pressure-agent:lite
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+
+  # ── 完整版：sentence-transformers + 本地 BGE 模型挂载 ──
+  agent-full:
+    build:
+      context: .
+      args:
+        INSTALL_EMBEDDINGS: "1"
+    image: blood-pressure-agent:full
+    profiles: ["full"]
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./bge-small-zh-v1.5:/app/bge-small-zh-v1.5:ro
+    restart: unless-stopped

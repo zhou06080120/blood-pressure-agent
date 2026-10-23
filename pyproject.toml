@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# ═══════════════════════════════════════════════════════════════════
+# 血压计客服 ReAct Agent —— 项目元数据与依赖声明
+# 本项目为平铺模块架构（src/*.py 无包结构），采用"虚包"安装模式：
+#   pip install -e .            → 只安装第三方依赖，源码原地可运行
+#   pip install -e ".[dev]"     → 附加 pytest / ruff 等开发工具链
+#   pip install -e ".[embeddings]" → 附加 sentence-transformers（本地 BGE 向量，
+#                                    含 torch 约 2GB，CI 与单测默认不装，缺省走降级路径）
+# ═══════════════════════════════════════════════════════════════════
+
+[project]
+name = "blood-pressure-agent"
+version = "1.0.0"
+description = "血压计客服 ReAct Agent：混合检索（BM25+Dense+RRF+Rerank）、故障决策图谱、六道安全防线、语义缓存与并行工具执行的 FastAPI 医疗器械客服系统"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "zhou06080120" }]
+keywords = ["react-agent", "hybrid-search", "rag", "fastapi", "medical-device", "customer-service"]
+dependencies = [
+    "openai>=1.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "numpy>=1.24.0",
+    "faiss-cpu>=1.7.3",
+]
+
+[project.optional-dependencies]
+embeddings = [
+    "sentence-transformers>=2.2.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "httpx>=0.27",
+]
+
+[tool.setuptools]
+# 虚包模式：不打包任何 Python 模块，pip install -e . 仅注册元数据与依赖
+py-modules = []
+
+# ═══════════════════════════════════════════════════════════════════
+# pytest：src 平铺模块通过 pythonpath 直接 import（无需包结构改造）
+# 覆盖率门槛 30%：与 CI 门禁保持一致
+# ═══════════════════════════════════════════════════════════════════
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = [
+    "--cov=tools",
+    "--cov=react_manual",
+    "--cov=safety_gate",
+    "--cov=guardrails",
+    "--cov=semantic_cache",
+    "--cov=conversation",
+    "--cov=hybrid_search",
+    "--cov=troubleshoot_graph",
+    "--cov=parallel_executor",
+    "--cov=serve",
+    "--cov-report=term-missing",
+    "--cov-fail-under=30",
+]
+
+# ═══════════════════════════════════════════════════════════════════
+# ruff：默认规则集（E4/E7/E9/F），与 bp-monitor-service-agent 口径一致
+# ═══════════════════════════════════════════════════════════════════
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.coverage.run]
+omit = [
+    "*/__pycache__/*",
+]
