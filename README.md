@@ -7,6 +7,12 @@
 
 面向医疗器械（血压计）场景的智能客服系统：双实现 ReAct Agent（手写解析版 + Function Calling 协议版）、BM25 + BGE Dense + RRF + Reranker 四层混合检索、故障排查决策图谱（BFS 多跳推演）、六道安全防线与两级语义缓存，通过 FastAPI + SSE 提供流式多轮对话服务。
 
+## 在线体验
+
+- **Demo**：http://8.148.220.136:8002 ——阿里云轻量服务器常驻部署；配 Key 后完整对话，限流 20 req/min/IP
+- **反馈**：回答不准？[提交 Issue](../../issues/new?labels=feedback&template=feedback.md)——检索 / 工具调用 / 安全拦截问题都会核实回复
+- 部署手册：[deploy/DEPLOY.md](deploy/DEPLOY.md)（Render 免费实例 10 分钟上线）
+
 ## 核心特性
 
 | 能力 | 说明 |
