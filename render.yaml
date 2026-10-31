@@ -1,0 +1,23 @@
+# Render Blueprint：New → Blueprint 选本仓库即可识别部署
+# 定位：按需唤醒的演示实例（不配心跳保活，见 deploy/DEPLOY.md 免费额度策略）
+services:
+  - type: web
+    name: blood-pressure-agent
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # ── Dashboard 手动填写（sync: false = 永不写入仓库）──
+      - key: DASHSCOPE_API_KEY     # 主链路 qwen（留空可起服务，Agent 对话降级）
+        sync: false
+      - key: BP_LLM_FALLBACK_API_KEY  # 备链路 Key（可选，配合下行 base_url 启用自动切换）
+        sync: false
+      - key: BP_ADMIN_KEYS         # 管理 Key（清空缓存等管理端点），随机长串
+        sync: false
+      # ── 公开 Demo 预设 ──
+      - key: RATE_LIMIT_RPM
+        value: "20"                # 公网收紧限流
+      - key: BP_EMBED_PROVIDER
+        value: local               # 镜像未带 BGE 目录，自动降级 TF 向量 + BM25（轻量形态）

@@ -42,12 +42,14 @@ COPY index.html ./
 USER appuser
 
 ENV PYTHONPATH=/deps \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PORT=8000
 
 EXPOSE 8000
 
 # 轻量健康检查：/health 不触发索引预热，毫秒级返回
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+    CMD python -c 'import os,urllib.request; urllib.request.urlopen("http://127.0.0.1:%s/health" % os.environ.get("PORT","8000"), timeout=3)'
 
-CMD ["python", "-m", "uvicorn", "--app-dir", "src", "serve:app", "--host", "0.0.0.0", "--port", "8000"]
+# shell 形式以读取 $PORT（平台注入时生效，本地回落 8000）
+CMD python -m uvicorn --app-dir src serve:app --host 0.0.0.0 --port ${PORT:-8000}
