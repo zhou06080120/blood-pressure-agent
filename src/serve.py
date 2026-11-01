@@ -247,7 +247,7 @@ async def list_sessions():
     return {"sessions": conv_manager.list_sessions()}  # 返回会话列表
 
 
-@app.get("/health")  # 注册 GET 路由：健康检查
+@app.api_route("/health", methods=["GET", "HEAD"])  # GET+HEAD：兼容第三方监控默认 HEAD 探测（UptimeRobot 免费版不可改 method）
 async def health():
     """健康检查：返回服务状态、模型名、并行度与缓存统计"""
     from semantic_cache import cache_stats  # 缓存统计函数
