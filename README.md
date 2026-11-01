@@ -10,6 +10,7 @@
 ## 在线体验
 
 - **Demo**：http://8.148.220.136:8002 ——阿里云轻量服务器常驻部署；配 Key 后完整对话，限流 20 req/min/IP
+- **服务状态**：[UptimeRobot 状态页](https://stats.uptimerobot.com/N2GzdOFuea)（第三方独立探测，24h/7d/30d 在线率可审计）
 - **反馈**：回答不准？[提交 Issue](../../issues/new?labels=feedback&template=feedback.md)——检索 / 工具调用 / 安全拦截问题都会核实回复
 - 部署手册：[deploy/DEPLOY.md](deploy/DEPLOY.md)（Render 免费实例 10 分钟上线）
 
